@@ -1,0 +1,14 @@
+# YOLOv8 OBB dataset config — Bottle vs Can detection
+# Yo'llar data.yaml joylashgan papkaga nisbatan
+
+path: ../data/processed
+train: train/images
+val: val/images
+test: test/images
+
+# Klasslar
+names:
+  0: bottle
+  1: can
+
+nc: 2

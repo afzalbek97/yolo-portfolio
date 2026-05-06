@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Datasets va katta fayllar (>100MB)
+data/raw/
+data/processed/
+*.zip
+
+# Training intermediate weights
+results/training/weights/
+results/training/*.pt
+
+# Auto-downloaded COCO weights (Ultralytics caches these on first run)
+yolov8n.pt
+yolov8s.pt
+yolov8m.pt
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Colab
+.ipynb_checkpoints/
