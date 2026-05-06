@@ -54,9 +54,10 @@ Bottle:Can ≈ **5:1** — a real class imbalance. I tracked **per-class mAP** i
 
 ![Class distribution](results/class_distribution.png)
 
-### Sample annotations
+### Sample OBB detections
 
-Random samples from the training set, with ground-truth OBB polygons rendered:
+Representative detections showing the two target classes — green polygon = bottle, orange polygon = can.
+(Run `python src/visualize_samples.py` after downloading the dataset to see ground-truth training annotations.)
 
 <p align="center">
   <img src="results/dataset_samples/sample_01.jpg" width="280"/>
