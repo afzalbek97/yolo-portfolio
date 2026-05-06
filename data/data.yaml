@@ -1,12 +1,13 @@
-# YOLOv8 OBB dataset config — Bottle vs Can detection
-# Yo'llar data.yaml joylashgan papkaga nisbatan
+# YOLOv8-OBB dataset config — Bottle vs Can detection
+# Dataset: Roboflow bouteille/bottle-and-can v7
+# Train: 1905 images | Val: 486 images | Test: 100 images
+# Class balance (train): bottle 43% / can 57%
 
-path: ../data/processed
+path: ./v7
 train: train/images
-val: val/images
+val: valid/images
 test: test/images
 
-# Klasslar
 names:
   0: bottle
   1: can

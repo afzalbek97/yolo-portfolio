@@ -6,9 +6,10 @@ __pycache__/
 venv/
 *.egg-info/
 
-# Datasets va katta fayllar (>100MB)
+# Datasets (large, downloaded via Roboflow API)
 data/raw/
 data/processed/
+data/v7/
 *.zip
 
 # Training intermediate weights
