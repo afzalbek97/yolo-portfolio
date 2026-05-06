@@ -1,72 +1,71 @@
-# Colab da Training: Bosqichma-bosqich qo'llanma
+# Training on Google Colab: Step-by-Step Guide
 
-Bu — sizning M1 Mac da YOLOv8-OBB ni o'qitishning eng oson yo'li. Driverdan foydalanmaymiz — to'g'ridan-to'g'ri zip yuklaymiz, chunki dataset kichik (~110MB).
+This is the recommended way to train YOLOv8-OBB on a T4 GPU without any local GPU setup.
+The dataset is small (~110 MB), so we upload the zip directly instead of using the Roboflow API.
 
-**Kutilayotgan vaqt:** 25-40 daqiqa (yuklash + training + saqlash).
-
----
-
-## Qadam 1 — Colab ni ochish (30 soniya)
-
-1. Brauzeringizda `https://colab.research.google.com` ni oching.
-2. Google akkauntingiz bilan kiring.
-3. **File → New notebook** bosing.
+**Estimated time:** 25–40 minutes (upload + training + download).
 
 ---
 
-## Qadam 2 — GPU ni yoqish (30 soniya, JUDA MUHIM)
+## Step 1 — Open Colab (30 seconds)
 
-1. Yuqori menyuda **Runtime → Change runtime type**.
-2. **Hardware accelerator** ostida **T4 GPU** ni tanlang.
-3. **Save** bosing.
+1. Go to `https://colab.research.google.com` in your browser.
+2. Sign in with your Google account.
+3. Click **File → New notebook**.
 
-GPU borligini tekshirish — birinchi cell ga yozing va ishga tushiring (Shift+Enter):
+---
+
+## Step 2 — Enable T4 GPU (30 seconds — IMPORTANT)
+
+1. In the top menu: **Runtime → Change runtime type**.
+2. Under **Hardware accelerator**, select **T4 GPU**.
+3. Click **Save**.
+
+Verify the GPU is active — run this in the first cell (Shift+Enter):
 
 ```python
 !nvidia-smi
 ```
 
-Agar `Tesla T4` ko'rsatsa — tayyor. Agar "command not found" yoki xato bo'lsa — GPU yoqilmagan, qadamni qaytaring.
+If you see `Tesla T4`, you are ready. If you see an error, repeat Step 2.
 
 ---
 
-## Qadam 3 — Datasetni yuklash (5-10 daqiqa, internetingizga qarab)
+## Step 3 — Upload the dataset (5–10 minutes depending on connection)
 
-Yangi cell yarating va shuni yozing:
+Create a new cell and run:
 
 ```python
 from google.colab import files
-uploaded = files.upload()  # dialog ochiladi
+uploaded = files.upload()  # opens a file dialog
 ```
 
-Shift+Enter bilan ishga tushiring. Ochilgan dialogdan **`dataset.zip`** ni tanlang. Joylashuvi:
+Select `dataset.zip` from your local machine (the file is in `data/` inside this repo after you prepare it).
 
-> `/Users/askarovafzalbek/Documents/yolo-portfolio/data/dataset.zip`
-
-Yuklash progress ko'rinadi. Tugagach — quyidagi cell ni qo'shing:
+Then unzip:
 
 ```python
 !unzip -q dataset.zip -d /content/
 !ls /content/processed/
 ```
 
-Natija quyidagicha bo'lishi kerak: `train  val  test`
+Expected output: `train  val  test`
 
 ---
 
-## Qadam 4 — Ultralytics o'rnatish (1 daqiqa)
+## Step 4 — Install Ultralytics (1 minute)
 
 ```python
-!pip install -q ultralytics==8.2.0
+!pip install -q "ultralytics>=8.3.0"
 import ultralytics
 ultralytics.checks()
 ```
 
-Bu YOLO ni o'rnatadi va GPU/CUDA ni tasdiqlaydi.
+This installs YOLO and confirms the GPU/CUDA setup.
 
 ---
 
-## Qadam 5 — data.yaml ni yaratish (10 soniya)
+## Step 5 — Create data.yaml (10 seconds)
 
 ```python
 yaml_content = """path: /content/processed
@@ -85,7 +84,7 @@ print(yaml_content)
 
 ---
 
-## Qadam 6 — Sanity check: dataset to'g'ri ekanligini tekshirish (1 daqiqa)
+## Step 6 — Sanity check: visualise OBB annotations (1 minute)
 
 ```python
 import cv2, glob, random
@@ -100,10 +99,14 @@ def draw_obb(img, label_path):
     with open(label_path) as f:
         for line in f:
             parts = line.strip().split()
-            if len(parts) < 9: continue
+            if len(parts) < 9:
+                continue
             cls = int(parts[0])
             coords = list(map(float, parts[1:9]))
-            pts = np.array([[coords[i]*w, coords[i+1]*h] for i in range(0,8,2)], dtype=np.int32)
+            pts = np.array(
+                [[coords[i] * w, coords[i + 1] * h] for i in range(0, 8, 2)],
+                dtype=np.int32,
+            )
             cv2.polylines(img, [pts], True, COLORS[cls], 3)
             cv2.putText(img, CLASS_NAMES[cls], tuple(pts[0]),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, COLORS[cls], 2)
@@ -116,22 +119,22 @@ for ax, img_path in zip(axes.flat, imgs):
     lbl = img_path.replace('/images/', '/labels/').replace('.jpg', '.txt')
     img = cv2.cvtColor(cv2.imread(img_path), cv2.COLOR_BGR2RGB)
     img = draw_obb(img, lbl)
-    ax.imshow(img); ax.axis('off')
-plt.tight_layout(); plt.show()
+    ax.imshow(img)
+    ax.axis('off')
+plt.tight_layout()
+plt.show()
 ```
 
-Yashil va apelsin polygonlar to'g'ri butilkalar/banka ustida ko'rinmasa — to'xtang va menga aytib bering.
+Green and orange polygons should appear over bottles and cans. If they are missing or misaligned, check that the dataset was extracted correctly.
 
 ---
 
-## Qadam 7 — TRAINING (15-25 daqiqa, T4 da)
-
-Bu eng muhim cell. Ishga tushiring va kuting:
+## Step 7 — Training (15–25 minutes on T4)
 
 ```python
 from ultralytics import YOLO
 
-model = YOLO('yolov8n-obb.pt')  # COCO pretrained nano OBB
+model = YOLO('yolov8n-obb.pt')  # COCO-pretrained nano OBB
 
 results = model.train(
     data='/content/processed/data.yaml',
@@ -141,7 +144,7 @@ results = model.train(
     optimizer='AdamW',
     lr0=0.001,
     cos_lr=True,
-    patience=20,         # 20 epoch yaxshilanmasa to'xtaydi
+    patience=20,        # early stopping: stop if no improvement for 20 epochs
     mosaic=1.0,
     mixup=0.15,
     hsv_h=0.015, hsv_s=0.7, hsv_v=0.4,
@@ -153,31 +156,29 @@ results = model.train(
 )
 ```
 
-**Kutish davomida nima ko'rasiz:**
-- Har bir epoch oxirida — `box_loss`, `cls_loss`, `mAP50`, `mAP50-95` raqamlari
-- 10-20 epoch dan keyin mAP50 odatda 0.6+ ga chiqadi
-- 50+ epoch dan keyin yaxshilanish sekinlashadi (EarlyStopping ishlaydi bo'lishi mumkin)
+**What you will see:** `box_loss`, `cls_loss`, `mAP50`, `mAP50-95` printed after each epoch.
+mAP50 typically reaches 0.6+ by epoch 10–20 and plateaus around epoch 50–70.
 
-**Agar xato chiqsa (out of memory):** `batch=16` ni `batch=8` qiling.
+**If you get an out-of-memory error:** reduce `batch=16` to `batch=8`.
 
 ---
 
-## Qadam 8 — Test setda baholash (1-2 daqiqa)
+## Step 8 — Evaluate on the test set (1–2 minutes)
 
 ```python
 best = '/content/runs/bottle_can_obb_v1/weights/best.pt'
 model = YOLO(best)
 metrics = model.val(data='/content/processed/data.yaml', split='test', plots=True)
-print('mAP@0.5      :', metrics.box.map50)
-print('mAP@0.5:0.95 :', metrics.box.map)
-print('Per-class mAP@0.5 (bottle, can):', metrics.box.maps)
+print('mAP@0.5      :', round(metrics.box.map50, 3))
+print('mAP@0.5:0.95 :', round(metrics.box.map, 3))
+print('Per-class mAP@0.5 (bottle, can):', [round(v, 3) for v in metrics.box.maps])
 ```
 
-Bu raqamlarni README ning "Results" qismiga yozasiz.
+Record these numbers for the README Results section.
 
 ---
 
-## Qadam 9 — Sample prediction rasmlari (1 daqiqa)
+## Step 9 — Save sample predictions (1 minute)
 
 ```python
 results = model.predict(
@@ -188,70 +189,65 @@ results = model.predict(
     name='test',
     exist_ok=True,
 )
-print('Saqlandi: /content/preds/test')
+print('Saved to: /content/preds/test')
 ```
 
 ---
 
-## Qadam 10 — Hammasini yuklab olish (1-2 daqiqa)
+## Step 10 — Download everything (1–2 minutes)
 
 ```python
-# Trained weights va training natijalarini zip qilamiz
-!zip -qr /content/training_results.zip /content/runs/bottle_can_obb_v1
-!zip -qr /content/predictions.zip /content/preds/test
-
+import shutil
 from google.colab import files
+
+shutil.make_archive('/content/training_results', 'zip', '/content/runs/bottle_can_obb_v1')
+shutil.make_archive('/content/predictions', 'zip', '/content/preds/test')
+
 files.download('/content/runs/bottle_can_obb_v1/weights/best.pt')
 files.download('/content/training_results.zip')
 files.download('/content/predictions.zip')
 ```
 
-3 ta dialog ochiladi — har birida **OK** bosing. Fayllar Mac ning `Downloads` ga tushadi:
-- `best.pt` — trained model weights (~6MB)
-- `training_results.zip` — confusion matrix, PR curves, results.png va h.k.
-- `predictions.zip` — test setdagi sample predictions
+Three download dialogs will open. Click **OK** for each. Files land in your `~/Downloads` folder:
+- `best.pt` — trained model weights (~6 MB)
+- `training_results.zip` — confusion matrix, PR curves, `results.png`, etc.
+- `predictions.zip` — test-set sample predictions
 
 ---
 
-## Qadam 11 — Mac da fayllarni o'z joyiga qo'yish
-
-Terminalda:
+## Step 11 — Move files into the repo
 
 ```bash
-cd ~/Documents/yolo-portfolio
+cd path/to/yolo-portfolio
 mv ~/Downloads/best.pt models/
-mkdir -p results/training
-unzip -o ~/Downloads/training_results.zip -d /tmp/
-cp -r /tmp/content/runs/bottle_can_obb_v1/* results/training/
-mkdir -p results/sample_predictions
-unzip -o ~/Downloads/predictions.zip -d /tmp/
-cp -r /tmp/content/preds/test/* results/sample_predictions/
+mkdir -p results/training results/sample_predictions
+unzip -o ~/Downloads/training_results.zip -d /tmp/train_results/
+cp -r /tmp/train_results/content/runs/bottle_can_obb_v1/* results/training/
+unzip -o ~/Downloads/predictions.zip -d /tmp/preds/
+cp -r /tmp/preds/* results/sample_predictions/
 ```
 
-Yoki menga ayting — men sizga ko'chirish uchun yordam beraman.
-
 ---
 
-## Qadam 12 — FastAPI ni mahalliy ishga tushirish
+## Step 12 — Run the FastAPI server locally
 
 ```bash
-cd ~/Documents/yolo-portfolio
-python3 -m venv .venv
+cd path/to/yolo-portfolio
+bash setup_mac.sh         # first time only: creates .venv and installs deps
 source .venv/bin/activate
-pip install -r requirements.txt
 uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-Brauzerda ochish: `http://localhost:8000/docs`
+Open in browser: `http://localhost:8000/docs`
 
 ---
 
-## Muammolar bo'lsa
+## Troubleshooting
 
-| Xato | Yechim |
+| Error | Fix |
 |---|---|
-| `nvidia-smi: command not found` | GPU yoqilmagan — Qadam 2 ni qaytaring |
-| `CUDA out of memory` | `batch=16` ni `batch=8` ga o'zgartiring |
-| `data.yaml not found` | Qadam 5 da yo'l noto'g'ri — `/content/processed/data.yaml` bo'lishi kerak |
-| Training juda sekin | GPU emas, CPU ishlamoqda — Runtime ni qayta tekshiring |
-| `ConnectionError` files.download da | Brauzerda popup blocker — yoqing yoki Drive ga saqlang |
+| `nvidia-smi: command not found` | GPU not enabled — repeat Step 2 |
+| `CUDA out of memory` | Change `batch=16` to `batch=8` |
+| `data.yaml not found` | Check path in Step 5: must be `/content/processed/data.yaml` |
+| Training very slow | Running on CPU, not GPU — re-check Runtime settings |
+| `ConnectionError` on `files.download` | Browser popup blocker — disable it or save to Google Drive instead |

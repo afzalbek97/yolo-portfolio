@@ -31,3 +31,13 @@ Thumbs.db
 
 # Colab
 .ipynb_checkpoints/
+
+# Private files — not for public repo
+INTERVIEW_QA.md
+scripts/push_to_github.sh
+
+# Unknown / corrupted binary files
+data/zi3YifWl
+
+# Environment variables
+.env

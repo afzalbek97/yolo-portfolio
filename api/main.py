@@ -27,26 +27,23 @@ from __future__ import annotations
 
 import io
 import os
+import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import List
 
+# Make src/ importable when running as `uvicorn api.main:app` from the repo root
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+
+import cv2
 import numpy as np
+from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.responses import StreamingResponse
+from PIL import Image
+from pydantic import BaseModel
+from ultralytics import YOLO
 
-# --- PyTorch 2.6+ compatibility patch (BEFORE ultralytics import) ---
-import torch as _torch  # noqa: E402
-_orig_torch_load = _torch.load
-def _patched_torch_load(*args, **kwargs):
-    kwargs.setdefault("weights_only", False)
-    return _orig_torch_load(*args, **kwargs)
-_torch.load = _patched_torch_load
-# --- end patch ---
-
-import cv2  # noqa: E402
-from fastapi import FastAPI, File, HTTPException, UploadFile  # noqa: E402
-from fastapi.responses import StreamingResponse  # noqa: E402
-from PIL import Image  # noqa: E402
-from pydantic import BaseModel  # noqa: E402
-from ultralytics import YOLO  # noqa: E402
+from detection_utils import iou_aabb as _iou_aabb, polygon_to_aabb as _polygon_to_aabb
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OBB_WEIGHTS = ROOT / "models" / "best.pt"
@@ -63,6 +60,26 @@ DEFAULT_OBB_CONF = 0.35
 DEFAULT_COCO_CONF = 0.25
 DEFAULT_IOU_GATE = 0.20
 
+_obb_model: YOLO | None = None
+_coco_model: YOLO | None = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _obb_model, _coco_model
+    if not OBB_WEIGHTS_PATH.exists():
+        print(f"[WARN] OBB weights not found: {OBB_WEIGHTS_PATH}. /predict will return 503.")
+    else:
+        print(f"[INFO] Loading Stage 2 OBB model: {OBB_WEIGHTS_PATH}")
+        _obb_model = YOLO(str(OBB_WEIGHTS_PATH))
+        print(f"[INFO] Loading Stage 1 COCO model: {COCO_WEIGHTS}")
+        _coco_model = YOLO(COCO_WEIGHTS)
+        print("[INFO] Two-stage pipeline ready")
+    yield
+    _obb_model = None
+    _coco_model = None
+
+
 app = FastAPI(
     title="Bottle vs Can Detection API",
     description=(
@@ -71,25 +88,8 @@ app = FastAPI(
         "Returns 4-corner polygons (8 coordinates) per detection."
     ),
     version="2.0.0",
+    lifespan=lifespan,
 )
-
-
-# --- Model loading on startup ---
-_obb_model: YOLO | None = None
-_coco_model: YOLO | None = None
-
-
-@app.on_event("startup")
-def load_models() -> None:
-    global _obb_model, _coco_model
-    if not OBB_WEIGHTS_PATH.exists():
-        print(f"[WARN] OBB weights not found: {OBB_WEIGHTS_PATH}. /predict will return 503.")
-        return
-    print(f"[INFO] Stage 2 OBB model yuklanmoqda: {OBB_WEIGHTS_PATH}")
-    _obb_model = YOLO(str(OBB_WEIGHTS_PATH))
-    print(f"[INFO] Stage 1 COCO model yuklanmoqda: {COCO_WEIGHTS}")
-    _coco_model = YOLO(COCO_WEIGHTS)
-    print("[INFO] Ikki bosqichli pipeline tayyor")
 
 
 # --- Schemas ---
@@ -97,8 +97,8 @@ class Detection(BaseModel):
     class_id: int
     class_name: str
     confidence: float
-    polygon: List[List[float]]  # 4 ta burchak nuqtasi
-    coco_iou: float = 0.0       # eng yaqin COCO container box bilan IoU (debug)
+    polygon: List[List[float]]  # 4 corner points of the OBB
+    coco_iou: float = 0.0       # IoU with the nearest Stage 1 container box (debug)
 
 
 class PredictionResponse(BaseModel):
@@ -114,7 +114,7 @@ def _read_image(file_bytes: bytes) -> np.ndarray:
     try:
         img = Image.open(io.BytesIO(file_bytes)).convert("RGB")
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Rasmni ochib bo'lmadi: {e}") from e
+        raise HTTPException(status_code=400, detail=f"Cannot open image: {e}") from e
     return np.array(img)
 
 
@@ -128,27 +128,6 @@ def _ensure_models() -> tuple[YOLO, YOLO]:
             ),
         )
     return _obb_model, _coco_model
-
-
-def _polygon_to_aabb(poly: np.ndarray) -> tuple[float, float, float, float]:
-    xs = poly[:, 0]
-    ys = poly[:, 1]
-    return float(xs.min()), float(ys.min()), float(xs.max()), float(ys.max())
-
-
-def _iou_aabb(a: tuple, b: tuple) -> float:
-    ax1, ay1, ax2, ay2 = a
-    bx1, by1, bx2, by2 = b
-    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
-    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
-    iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
-    inter = iw * ih
-    if inter == 0:
-        return 0.0
-    area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
-    area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
-    union = area_a + area_b - inter
-    return inter / union if union > 0 else 0.0
 
 
 def _run_cascade(
