@@ -49,13 +49,22 @@ COLORS = {0: (0, 200, 0), 1: (0, 100, 255)}  # BGR: bottle=green, can=orange
 # COCO class IDs for container-like objects: bottle=39, wine glass=40, cup=41
 COCO_CONTAINER_CLASSES = {39, 40, 41}
 
+# Per-class IoU gate thresholds.
+# COCO has a "bottle" class (39) so we can confirm bottle detections via IoU.
+# COCO has NO "can" class, so we bypass the gate for cans to avoid suppressing
+# all valid can detections — this is the right engineering trade-off.
+IOU_GATE_BY_CLASS = {
+    0: 0.20,   # bottle — confirmed by COCO
+    1: 0.0,    # can    — COCO cannot confirm, gate bypassed
+}
+
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Bottle vs Can two-stage live demo")
     p.add_argument("--source", default="0",
                    help="Camera index (0, 1, ...) or path to a video file")
-    p.add_argument("--obb-conf", type=float, default=0.35,
-                   help="OBB confidence threshold (default 0.35; lower = more detections)")
+    p.add_argument("--obb-conf", type=float, default=0.30,
+                   help="OBB confidence threshold (default 0.30)")
     p.add_argument("--coco-conf", type=float, default=0.25,
                    help="Stage 1 COCO confidence threshold (default 0.25)")
     p.add_argument("--iou-gate", type=float, default=0.20,
@@ -143,16 +152,22 @@ def main() -> None:
             confs = obb.conf.cpu().numpy()
             clses = obb.cls.cpu().numpy()
             for poly, cf, cls in zip(polys, confs, clses):
-                # Skip the COCO gate if cascade is disabled
+                cls_int = int(cls)
                 if args.no_cascade:
                     passes = True
                 else:
-                    aabb = polygon_to_aabb(poly)
-                    best_iou = max((iou_aabb(aabb, c) for c in coco_aabbs), default=0.0)
-                    passes = best_iou >= args.iou_gate
+                    # Per-class IoU gate:
+                    # - bottle (0): COCO has class 39 "bottle" → strict overlap check
+                    # - can (1): COCO has NO can class → bypass gate entirely
+                    gate = IOU_GATE_BY_CLASS.get(cls_int, args.iou_gate)
+                    if gate == 0.0:
+                        passes = True  # can: always pass Stage 1
+                    else:
+                        aabb = polygon_to_aabb(poly)
+                        best_iou = max((iou_aabb(aabb, c) for c in coco_aabbs), default=0.0)
+                        passes = best_iou >= gate
 
                 if passes:
-                    cls_int = int(cls)
                     color = COLORS.get(cls_int, (255, 255, 255))
                     pts = poly.astype(np.int32)
                     cv2.polylines(annotated, [pts], True, color, 3)
@@ -170,9 +185,9 @@ def main() -> None:
             fps_t0 = time.time()
             n_frames = 0
 
-        cascade_str = "disabled" if args.no_cascade else f"ON iou≥{args.iou_gate}"
-        hud1 = f"Detections: {kept}  rejected: {rejected}  cascade: {cascade_str}"
-        hud2 = f"FPS: {fps:.1f}  conf={args.obb_conf}  Stage1 containers: {len(coco_aabbs)}  [q=quit s=save]"
+        gate_str = "off" if args.no_cascade else "bottle:iou≥0.20 | can:bypass"
+        hud1 = f"Kept: {kept}  Rejected: {rejected}  Gate: {gate_str}"
+        hud2 = f"FPS: {fps:.1f}  conf={args.obb_conf}  COCO boxes: {len(coco_aabbs)}  [s=save  q=quit]"
         cv2.putText(annotated, hud1, (10, 30), cv2.FONT_HERSHEY_SIMPLEX,
                     0.65, (255, 255, 255), 2, cv2.LINE_AA)
         cv2.putText(annotated, hud2, (10, 58), cv2.FONT_HERSHEY_SIMPLEX,

@@ -56,9 +56,14 @@ CLASS_NAMES = {0: "bottle", 1: "can"}
 COCO_CONTAINER_CLASSES = {39, 40, 41}
 
 # Cascade hyper-parameters
-DEFAULT_OBB_CONF = 0.35
+DEFAULT_OBB_CONF = 0.30
 DEFAULT_COCO_CONF = 0.25
 DEFAULT_IOU_GATE = 0.20
+
+# Per-class IoU gate:
+# bottle (0): COCO has class 39 "bottle" → validate via IoU
+# can (1):    COCO has NO can class → bypass gate to avoid suppressing all cans
+IOU_GATE_BY_CLASS = {0: DEFAULT_IOU_GATE, 1: 0.0}
 
 _obb_model: YOLO | None = None
 _coco_model: YOLO | None = None
@@ -159,10 +164,13 @@ def _run_cascade(
         confs = obb.conf.cpu().numpy() if hasattr(obb.conf, "cpu") else obb.conf
         clses = obb.cls.cpu().numpy() if hasattr(obb.cls, "cpu") else obb.cls
         for poly, cf, cls in zip(polys, confs, clses):
+            cls_int = int(cls)
+            # Per-class gate: bottle uses COCO IoU check, can bypasses it
+            # (COCO has no "can" class, so strict IoU would suppress all cans)
+            per_class_gate = IOU_GATE_BY_CLASS.get(cls_int, iou_gate)
             aabb = _polygon_to_aabb(poly)
             best_iou = max((_iou_aabb(aabb, c) for c in coco_aabbs), default=0.0)
-            if best_iou >= iou_gate:
-                cls_int = int(cls)
+            if per_class_gate == 0.0 or best_iou >= per_class_gate:
                 kept.append(Detection(
                     class_id=cls_int,
                     class_name=CLASS_NAMES.get(cls_int, str(cls_int)),
