@@ -6,18 +6,30 @@ Stage 1: COCO-pretrained YOLOv8n (general detector, 80 classes)
 Stage 2: Custom YOLOv8n-OBB (oriented bottle/can classifier)
          — keeps only OBB detections that overlap a Stage 1 container box
 
-This cascade architecture dramatically reduces false positives caused by
-domain shift from the limited Roboflow training set.
+The cascade reduces false positives from domain shift (model trained on
+Roboflow studio images, tested in a real room).
 
 Usage:
     cd yolo-portfolio
     source .venv/bin/activate
+
+    # Default (cascade on, default thresholds)
     python src/webcam_demo.py
+
+    # Lower thresholds to catch more cans (trade-off: more false positives)
+    python src/webcam_demo.py --obb-conf 0.20 --iou-gate 0.10
+
+    # Disable Stage 1 filter entirely (raw OBB output, more detections)
+    python src/webcam_demo.py --no-cascade
+
+    # Use a video file instead of webcam
+    python src/webcam_demo.py --source path/to/video.mp4
 
 Keys: 'q' quit, 's' save screenshot
 """
 from __future__ import annotations
 
+import argparse
 import sys
 import time
 from pathlib import Path
@@ -34,40 +46,70 @@ COCO_WEIGHTS = "yolov8n.pt"  # auto-downloaded by ultralytics on first run
 CLASS_NAMES = {0: "bottle", 1: "can"}
 COLORS = {0: (0, 200, 0), 1: (0, 100, 255)}  # BGR: bottle=green, can=orange
 
-# COCO class IDs that correspond to container-like objects
-# bottle=39, wine glass=40, cup=41
+# COCO class IDs for container-like objects: bottle=39, wine glass=40, cup=41
 COCO_CONTAINER_CLASSES = {39, 40, 41}
 
-OBB_CONF = 0.35   # lower threshold is fine — Stage 1 already pre-filters
-COCO_CONF = 0.25
-IOU_GATE = 0.20   # minimum AABB overlap to keep an OBB detection
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Bottle vs Can two-stage live demo")
+    p.add_argument("--source", default="0",
+                   help="Camera index (0, 1, ...) or path to a video file")
+    p.add_argument("--obb-conf", type=float, default=0.35,
+                   help="OBB confidence threshold (default 0.35; lower = more detections)")
+    p.add_argument("--coco-conf", type=float, default=0.25,
+                   help="Stage 1 COCO confidence threshold (default 0.25)")
+    p.add_argument("--iou-gate", type=float, default=0.20,
+                   help="Minimum IoU overlap with a COCO box to keep an OBB detection "
+                        "(default 0.20; lower = more permissive)")
+    p.add_argument("--no-cascade", action="store_true",
+                   help="Disable Stage 1 filter — show raw OBB output (more detections, "
+                        "more false positives)")
+    return p.parse_args()
 
 
 def main() -> None:
+    args = parse_args()
+
     if not OBB_WEIGHTS.exists():
         print(f"[ERROR] Model weights not found: {OBB_WEIGHTS}")
         print("  → Train the model in the Colab notebook and copy models/best.pt here.")
         sys.exit(1)
 
-    print(f"[INFO] Loading Stage 1 (COCO): {COCO_WEIGHTS}")
-    coco_model = YOLO(COCO_WEIGHTS)
+    if not args.no_cascade:
+        print(f"[INFO] Loading Stage 1 (COCO): {COCO_WEIGHTS}")
+        coco_model = YOLO(COCO_WEIGHTS)
+    else:
+        coco_model = None
+        print("[INFO] Cascade disabled — running Stage 2 (OBB) only")
+
     print(f"[INFO] Loading Stage 2 (OBB): {OBB_WEIGHTS}")
     obb_model = YOLO(str(OBB_WEIGHTS))
-    print("[INFO] Two-stage pipeline ready")
+    print("[INFO] Pipeline ready")
 
-    print("[INFO] Opening camera...")
-    cap = cv2.VideoCapture(0)
+    # Accept either an integer camera index or a file path
+    source: int | str = args.source
+    try:
+        source = int(args.source)
+    except ValueError:
+        pass  # it's a file path, leave as string
+
+    print(f"[INFO] Opening source: {source}")
+    cap = cv2.VideoCapture(source)
     if not cap.isOpened():
-        print("[ERROR] Camera could not be opened.")
-        print("  → macOS: System Settings → Privacy & Security → Camera → allow Terminal/Python")
-        return
+        print("[ERROR] Could not open video source.")
+        if isinstance(source, int):
+            print("  → macOS: System Settings → Privacy & Security → Camera → allow Terminal/Python")
+        sys.exit(1)
 
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
 
     snapshot_dir = ROOT / "results" / "webcam_snapshots"
     snapshot_dir.mkdir(parents=True, exist_ok=True)
-    print("[INFO] Ready! Press 'q' to quit, 's' to save a snapshot.")
+
+    cascade_label = "OFF (raw OBB)" if args.no_cascade else f"ON  (iou≥{args.iou_gate})"
+    print(f"[INFO] OBB conf={args.obb_conf}  COCO conf={args.coco_conf}  Cascade={cascade_label}")
+    print("[INFO] Press 'q' to quit, 's' to save a snapshot.")
 
     fps_t0 = time.time()
     n_frames = 0
@@ -78,17 +120,18 @@ def main() -> None:
         if not ok:
             break
 
-        # === STAGE 1: COCO general detector ===
-        coco_results = coco_model.predict(frame, conf=COCO_CONF, verbose=False)
+        # === STAGE 1: COCO general detector (optional) ===
         coco_aabbs: list[tuple] = []
-        if coco_results and coco_results[0].boxes is not None:
-            boxes = coco_results[0].boxes
-            for cls_id, xyxy in zip(boxes.cls.cpu().numpy(), boxes.xyxy.cpu().numpy()):
-                if int(cls_id) in COCO_CONTAINER_CLASSES:
-                    coco_aabbs.append(tuple(map(float, xyxy)))
+        if coco_model is not None:
+            coco_results = coco_model.predict(frame, conf=args.coco_conf, verbose=False)
+            if coco_results and coco_results[0].boxes is not None:
+                boxes = coco_results[0].boxes
+                for cls_id, xyxy in zip(boxes.cls.cpu().numpy(), boxes.xyxy.cpu().numpy()):
+                    if int(cls_id) in COCO_CONTAINER_CLASSES:
+                        coco_aabbs.append(tuple(map(float, xyxy)))
 
         # === STAGE 2: custom OBB, then gate against Stage 1 results ===
-        obb_results = obb_model.predict(frame, conf=OBB_CONF, verbose=False)
+        obb_results = obb_model.predict(frame, conf=args.obb_conf, verbose=False)
 
         annotated = frame.copy()
         kept = 0
@@ -100,9 +143,15 @@ def main() -> None:
             confs = obb.conf.cpu().numpy()
             clses = obb.cls.cpu().numpy()
             for poly, cf, cls in zip(polys, confs, clses):
-                aabb = polygon_to_aabb(poly)
-                best_iou = max((iou_aabb(aabb, c) for c in coco_aabbs), default=0.0)
-                if best_iou >= IOU_GATE:
+                # Skip the COCO gate if cascade is disabled
+                if args.no_cascade:
+                    passes = True
+                else:
+                    aabb = polygon_to_aabb(poly)
+                    best_iou = max((iou_aabb(aabb, c) for c in coco_aabbs), default=0.0)
+                    passes = best_iou >= args.iou_gate
+
+                if passes:
                     cls_int = int(cls)
                     color = COLORS.get(cls_int, (255, 255, 255))
                     pts = poly.astype(np.int32)
@@ -121,12 +170,13 @@ def main() -> None:
             fps_t0 = time.time()
             n_frames = 0
 
-        hud1 = f"Detections: {kept}  (rejected by COCO gate: {rejected})"
-        hud2 = f"FPS: {fps:.1f}  |  Stage1 containers: {len(coco_aabbs)}  |  q: quit, s: save"
+        cascade_str = "disabled" if args.no_cascade else f"ON iou≥{args.iou_gate}"
+        hud1 = f"Detections: {kept}  rejected: {rejected}  cascade: {cascade_str}"
+        hud2 = f"FPS: {fps:.1f}  conf={args.obb_conf}  Stage1 containers: {len(coco_aabbs)}  [q=quit s=save]"
         cv2.putText(annotated, hud1, (10, 30), cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7, (255, 255, 255), 2, cv2.LINE_AA)
-        cv2.putText(annotated, hud2, (10, 60), cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6, (180, 180, 180), 2, cv2.LINE_AA)
+                    0.65, (255, 255, 255), 2, cv2.LINE_AA)
+        cv2.putText(annotated, hud2, (10, 58), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.55, (180, 180, 180), 2, cv2.LINE_AA)
 
         cv2.imshow("Bottle vs Can — Two-Stage Live Demo", annotated)
 
