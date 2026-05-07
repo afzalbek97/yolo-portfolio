@@ -6,8 +6,8 @@ Usage:
     source .venv/bin/activate
     python src/webcam_demo.py
 
-    # Lower threshold if cans are missed (class imbalance causes lower can confidence)
-    python src/webcam_demo.py --conf 0.20
+    # Lower threshold if cans are missed
+    python src/webcam_demo.py --conf 0.30
 
     # Use a video file instead of webcam
     python src/webcam_demo.py --source path/to/video.mp4
@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+from collections import defaultdict
 from pathlib import Path
 
 import cv2
@@ -29,17 +30,23 @@ ROOT = Path(__file__).resolve().parent.parent
 OBB_WEIGHTS = ROOT / "models" / "best.pt"
 
 CLASS_NAMES = {0: "bottle", 1: "can"}
-COLORS      = {0: (0, 200, 0), 1: (0, 100, 255)}   # BGR: bottle=green, can=orange
+COLORS      = {0: (0, 200, 0), 1: (0, 100, 255)}
 LABEL_BG    = {0: (0, 160, 0), 1: (0, 70, 200)}
+
+STABILITY_FRAMES = 3    # detection must appear this many frames in a row
+MAX_AREA_RATIO   = 0.30 # ignore detections covering >30% of frame (heads, walls)
+MIN_AREA_RATIO   = 0.005
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
-    p.add_argument("--source", default="0",
-                   help="Camera index (0, 1, …) or path to a video file")
-    p.add_argument("--conf", type=float, default=0.25,
-                   help="Detection confidence threshold (default 0.25; lower = more detections)")
+    p.add_argument("--source", default="0")
+    p.add_argument("--conf", type=float, default=0.40)
     return p.parse_args()
+
+
+def box_center(poly: np.ndarray) -> tuple[int, int]:
+    return int(poly[:, 0].mean()), int(poly[:, 1].mean())
 
 
 def main() -> None:
@@ -47,12 +54,10 @@ def main() -> None:
 
     if not OBB_WEIGHTS.exists():
         print(f"[ERROR] Weights not found: {OBB_WEIGHTS}")
-        print("  → Train the model in the Colab notebook and place models/best.pt here.")
         sys.exit(1)
 
     print(f"[INFO] Loading model: {OBB_WEIGHTS}")
     model = YOLO(str(OBB_WEIGHTS))
-    print(f"[INFO] conf={args.conf}  classes={CLASS_NAMES}")
 
     source: int | str = args.source
     try:
@@ -63,7 +68,6 @@ def main() -> None:
     cap = cv2.VideoCapture(source)
     if not cap.isOpened():
         print("[ERROR] Could not open camera.")
-        print("  → macOS: System Settings → Privacy & Security → Camera → allow Terminal/Python")
         sys.exit(1)
 
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
@@ -73,20 +77,24 @@ def main() -> None:
     snapshot_dir.mkdir(parents=True, exist_ok=True)
     print("[INFO] Ready — press 's' to save, 'q' to quit.")
 
-    fps_t0  = time.time()
+    fps_t0   = time.time()
     n_frames = 0
     fps      = 0.0
+
+    # Temporal stability: count how many consecutive frames each (class, approx_center) was seen
+    stability: dict[tuple, int] = defaultdict(int)
+    confirmed: dict[tuple, tuple] = {}  # key -> (poly, conf, cls)
 
     while True:
         ok, frame = cap.read()
         if not ok:
             break
 
+        h, w = frame.shape[:2]
+        frame_area = h * w
         results = model.predict(frame, conf=args.conf, verbose=False)
-        annotated = frame.copy()
-        n_bottle = 0
-        n_can    = 0
 
+        raw_detections = []
         if results and results[0].obb is not None:
             obb   = results[0].obb
             polys = obb.xyxyxyxy.cpu().numpy().astype(np.int32)
@@ -94,30 +102,55 @@ def main() -> None:
             clses = obb.cls.cpu().numpy().astype(int)
 
             for poly, cf, cls in zip(polys, confs, clses):
-                color  = COLORS.get(cls, (200, 200, 200))
-                bg     = LABEL_BG.get(cls, (80, 80, 80))
-                label  = f"{CLASS_NAMES.get(cls, cls)}  {cf:.2f}"
+                area_ratio = float(cv2.contourArea(poly)) / frame_area
+                if area_ratio > MAX_AREA_RATIO or area_ratio < MIN_AREA_RATIO:
+                    continue
+                cx, cy = box_center(poly)
+                # Bucket center into 80px grid for stability tracking
+                key = (int(cls), cx // 80, cy // 80)
+                raw_detections.append((key, poly, float(cf), int(cls)))
 
-                cv2.polylines(annotated, [poly], True, color, 3)
+        # Update stability counters
+        seen_keys = {key for key, *_ in raw_detections}
+        for key in list(stability.keys()):
+            if key not in seen_keys:
+                stability[key] = max(0, stability[key] - 1)
+                if stability[key] == 0:
+                    confirmed.pop(key, None)
 
-                x0, y0 = poly[0]
-                (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.65, 2)
-                cv2.rectangle(annotated, (x0-4, y0-th-8), (x0+tw+4, y0), bg, -1)
-                cv2.putText(annotated, label, (x0, y0-4),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2, cv2.LINE_AA)
+        for key, poly, cf, cls in raw_detections:
+            stability[key] += 1
+            if stability[key] >= STABILITY_FRAMES:
+                confirmed[key] = (poly, cf, cls)
 
-                if cls == 0: n_bottle += 1
-                else:        n_can    += 1
+        # Draw only confirmed stable detections
+        annotated = frame.copy()
+        n_bottle = n_can = 0
 
-        # FPS (rolling 10-frame window)
+        for poly, cf, cls in confirmed.values():
+            color = COLORS.get(cls, (200, 200, 200))
+            bg    = LABEL_BG.get(cls, (80, 80, 80))
+            label = f"{CLASS_NAMES.get(cls, cls)}  {cf:.2f}"
+
+            cv2.polylines(annotated, [poly], True, color, 3)
+            x0, y0 = poly[0]
+            (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.65, 2)
+            cv2.rectangle(annotated, (x0-4, y0-th-8), (x0+tw+4, y0), bg, -1)
+            cv2.putText(annotated, label, (x0, y0-4),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2, cv2.LINE_AA)
+
+            if cls == 0: n_bottle += 1
+            else:        n_can    += 1
+
+        # FPS
         n_frames += 1
         if n_frames >= 10:
-            fps     = n_frames / (time.time() - fps_t0)
-            fps_t0  = time.time()
+            fps      = n_frames / (time.time() - fps_t0)
+            fps_t0   = time.time()
             n_frames = 0
 
         hud = (f"bottle: {n_bottle}   can: {n_can}   "
-               f"conf≥{args.conf}   FPS: {fps:.0f}   [s=save  q=quit]")
+               f"conf>={args.conf}   FPS: {fps:.0f}   [s=save  q=quit]")
         cv2.rectangle(annotated, (0, 0), (annotated.shape[1], 36), (0, 0, 0), -1)
         cv2.putText(annotated, hud, (10, 24),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2, cv2.LINE_AA)
@@ -135,7 +168,6 @@ def main() -> None:
 
     cap.release()
     cv2.destroyAllWindows()
-    print("[INFO] Done.")
 
 
 if __name__ == "__main__":
